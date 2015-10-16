@@ -183,6 +183,28 @@ static void external_peer_cb(struct ev_loop* event_loop, ev_io* io, int events) 
             }
         } else if (bytes_read == 0) { // eof of a socket???
             printf("external peer is eof?!!!\r\n");
+            char peer_cidr[256] = {0};
+            inet_ntop(AF_INET, &((struct sockaddr_in*)&peer_ctx.addr)->sin_addr, peer_cidr, peer_ctx.addr_len);
+            printf("external peer(fd: %d, addr(%s:%d)) is eof?!!!\r\n",
+                   io->fd, peer_cidr, ((struct sockaddr_in*)&peer_ctx.addr)->sin_port);
+            // flush into internal peer's wbuf
+            size_t internal_peer_wbuf_space = g_internal_peer_ctx.wbuf_size-(g_internal_peer_ctx.wbuf_pos+g_internal_peer_ctx.wbuf_len);
+            // if internal peer's wbuf space is too small, can't flush now
+            if(internal_peer_wbuf_space >= PKG_HEADER_SIZE) {
+                char pkg_header[PKG_HEADER_SIZE] = {0};
+                {
+                    int8_t* pkg_peer_id_bytes = (int8_t*)&peer_ctx.fd; // assumed little-endian
+                    pkg_header[4] = pkg_peer_id_bytes[3]; pkg_header[5] = pkg_peer_id_bytes[2];
+                    pkg_header[6] = pkg_peer_id_bytes[1]; pkg_header[7] = pkg_peer_id_bytes[0];
+                }
+                pkg_header[8] = 'L'; pkg_header[9] = 'C'; // LC
+                memcpy(g_internal_peer_ctx.wbuf+g_internal_peer_ctx.wbuf_pos+g_internal_peer_ctx.wbuf_len, pkg_header, PKG_HEADER_SIZE);
+                g_internal_peer_ctx.wbuf_len += PKG_HEADER_SIZE;
+
+                ev_io_stop(event_loop, io);
+                peer_ctx.fd = 0;
+            }
+
             return ;
         } else {
             peer_ctx.rbuf_len += bytes_read;
@@ -327,8 +349,13 @@ static void internal_peer_cb(struct ev_loop* event_loop, ev_io* io, int events) 
             if (errno == EAGAIN) { // non-block but data is not ready
                 return ;
             }
-        } else if (bytes_read == 0) { // eof of a socket???
-            printf("internal peer is eof?!!!\r\n");
+        } else if (bytes_read == 0) { // eof of a socket?!!
+            char peer_cidr[256] = {0};
+            inet_ntop(AF_INET, &((struct sockaddr_in*)&g_internal_peer_ctx.addr)->sin_addr, peer_cidr, g_internal_peer_ctx.addr_len);
+            printf("internal peer(fd: %d, addr(%s:%d)) is eof?!!!\r\n",
+                   io->fd, peer_cidr, ((struct sockaddr_in*)&g_internal_peer_ctx.addr)->sin_port);
+            ev_io_stop(event_loop, io);
+            g_internal_peer_ctx.fd = 0;
             return;
         } else {
             g_internal_peer_ctx.rbuf_len += bytes_read;
