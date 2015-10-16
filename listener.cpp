@@ -93,7 +93,9 @@ static int listener(int external_port, int internal_port) {
 
     // bind socks
     struct sockaddr_in sockaddr_in1 = {0};
-    sockaddr_in1.sin_len = sizeof(sockaddr_in1);
+    #if defined(__APPLE__)
+        sockaddr_in1.sin_len = sizeof(sockaddr_in1);
+    #endif
     sockaddr_in1.sin_family = AF_INET;
     sockaddr_in1.sin_port = htons(external_port);
     if(inet_pton(AF_INET, "0.0.0.0", &sockaddr_in1.sin_addr) != 1) {
