@@ -10,6 +10,7 @@
 
 #include <arpa/inet.h>
 
+
 #include <netdb.h>
 
 #include <errno.h>
@@ -147,7 +148,7 @@ static int slave(struct sockaddr** internal_addrs, struct sockaddr** worker_addr
         bool connected = false;
         for (int internal_addr_cursor = 0; internal_addrs[internal_addr_cursor] != NULL; ++internal_addr_cursor) {
             struct sockaddr* internal_addr = internal_addrs[internal_addr_cursor];
-            if(connect(internal_peer, internal_addr, internal_addr->sa_len) == -1) {
+            if(connect(internal_peer, internal_addr, sizeof(internal_addr)) == -1) {
                 printf("connect internal failed, errno: %d\r\n", errno);
             } else {
                 // set internal peer to non-block
@@ -317,7 +318,7 @@ static void consume_internal_peer_pkg(struct ev_loop* event_loop) {
         bool connected = false;
         for(int worker_addr_curosr = 0; g_worker_addrs[worker_addr_curosr] != NULL; ++ worker_addr_curosr) {
             struct sockaddr* worker_addr = g_worker_addrs[worker_addr_curosr];
-            if(connect(worker_peer_fd, worker_addr, worker_addr->sa_len) == -1) {
+            if(connect(worker_peer_fd, worker_addr, sizeof(worker_addr)) == -1) {
                 printf("connect worker failed, errno: %d\r\n", errno);
             } else {
                 // set worker peer to non-block
