@@ -7,7 +7,7 @@
 #include <ev.h>
 
 typedef struct SPeerCtx {
-    int fd;
+    int32_t fd;
     struct sockaddr addr;
     ev_io io;
     char rbuf[2*40960];
