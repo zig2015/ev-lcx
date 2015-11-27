@@ -269,12 +269,17 @@ static void external_sock_cb(struct ev_loop* event_loop, ev_io* io, int events) 
     if(inet_ntop(AF_INET, &new_external_peer_addr_in.sin_addr, peer_cidr, sizeof(peer_cidr)) == NULL) {
         printf("convert external_sock's peer cidr failed, errno: %d\r\n", errno);
     }
-    printf("got a external peer - fd(%d), addr(%s:%d)\r\n", new_external_peer_fd, peer_cidr, ntohs(
-            new_external_peer_addr_in.sin_port));
-    // TODO: tell "NC"(New Connection) to internal peer
+    printf("got a external peer - fd(%d), addr(%s:%d)\r\n", new_external_peer_fd, peer_cidr, ntohs(new_external_peer_addr_in.sin_port));
+    // check internal peer wbuf size
+    size_t g_internal_peer_wbuf_space = g_internal_peer_ctx.wbuf_size - (g_internal_peer_ctx.wbuf_pos+g_internal_peer_ctx.wbuf_len);
+    if (g_internal_peer_wbuf_space < PKG_HEADER_SIZE) {
+        printf("internal peer wbuf is full\r\n");
+        return ;
+    }
     char nc_pkg_header[PKG_HEADER_SIZE] = {0};
     {
         int8_t* pkg_peer_id_bytes = (int8_t*)&new_external_peer_ctx->fd; // assumed little-endian
+        printf("\tmake it a id: %lld\r\n", new_external_peer_ctx->fd);
         nc_pkg_header[4] = pkg_peer_id_bytes[3]; nc_pkg_header[5] = pkg_peer_id_bytes[2];
         nc_pkg_header[6] = pkg_peer_id_bytes[1]; nc_pkg_header[7] = pkg_peer_id_bytes[0];
     }
