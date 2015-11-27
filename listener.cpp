@@ -57,12 +57,14 @@ static int listener(const int external_port, const int internal_port) {
         printf("socket external failed,errno: %d\r\n", errno);
         return (-1);
     }
+#if defined(__APPLE__)
     // ignore sigpipe
     static const int ignore = 1;
     if (setsockopt(external_sock, SOL_SOCKET, SO_NOSIGPIPE, (void*)&ignore, sizeof(ignore)) != 0) {
       printf("setsockopt external_sock SO_NOSIGPIPE failed, errno: %d\r\n", errno);
       return (-1);
     }
+#endif    
     // set reuseable
     static const int enable = 1;
     if(setsockopt(external_sock, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(int)) != 0) {
@@ -74,11 +76,13 @@ static int listener(const int external_port, const int internal_port) {
         printf("socket external failed,errno: %d\r\n", errno);
         return (-1);
     }
+#if defined(__APPLE__)
     // ignore sigpipe
     if (setsockopt(internal_sock, SOL_SOCKET, SO_NOSIGPIPE, (void*)&ignore, sizeof(ignore)) != 0) {
       printf("setsockopt internal_sock SO_NOSIGPIPE failed, errno: %d\r\n", errno);
       return (-1);
     }
+#endif    
     // set reuseable
     if(setsockopt(internal_sock, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(int)) != 0) {
         printf("setsockopt internal_sock SO_REUSEADDR failed, errno: %d\r\n", errno);
@@ -115,12 +119,12 @@ static int listener(const int external_port, const int internal_port) {
         printf("inet_pton 0.0.0.0 failed, errno: %d\r\n", errno);
         return (-1);
     }
-    if(bind(external_sock, (const sockaddr*)&sockaddr_in1, sizeof(sockaddr_in1)) != 0) {
+    if(::bind(external_sock, (const sockaddr*)&sockaddr_in1, sizeof(sockaddr_in1)) != 0) {
         printf("bind external_sock failed, errno: %d\r\n", errno);
         return (-1);
     }
     sockaddr_in1.sin_port = htons(internal_port);
-    if(bind(internal_sock, (const sockaddr*)&sockaddr_in1, sizeof(sockaddr_in1)) != 0) {
+    if(::bind(internal_sock, (const sockaddr*)&sockaddr_in1, sizeof(sockaddr_in1)) != 0) {
         printf("bind internal_sock failed, errno: %d\r\n", errno);
         return (-1);
     }

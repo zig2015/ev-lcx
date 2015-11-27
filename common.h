@@ -80,7 +80,11 @@ public:
       if (this->m_wbuf_len <= 0) {
 	return (-1);
       }
+#if defined(__linux__)
+      int result = send(this->m_io->fd, this->m_wbuf, this->m_wbuf_len, MSG_NOSIGNAL);
+#elif defined(__APPLE__)
       int result = write(this->m_io->fd, this->m_wbuf, this->m_wbuf_len);
+#endif	    
       if (result == -1) {
 	if (errno == EWOULDBLOCK) {
 	  result = -1;

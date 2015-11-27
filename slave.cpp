@@ -144,12 +144,14 @@ static int slave(struct sockaddr** internal_addrs, struct sockaddr** worker_addr
 
   { // connect internal
     int internal_peer = socket(AF_INET, SOCK_STREAM, 0);
+#if defined(__APPLE__)
     // ignore sigpipe
     static const int ignore = 1;
     if (setsockopt(internal_peer, SOL_SOCKET, SO_NOSIGPIPE, (void*)&ignore, sizeof(ignore)) != 0) {
       printf("setsockopt internal_peer SO_NOSIGPIPE failed, errno: %d\r\n", errno);
       return (-1);
     }
+#endif    
     
     bool connected = false;
     for (int internal_addr_cursor = 0; internal_addrs[internal_addr_cursor] != NULL; ++internal_addr_cursor) {
@@ -277,11 +279,13 @@ static void consume_internal_peer_pkg(struct ev_loop* event_loop) {
   if(memcmp(rbuf+8, "NC", 2) == 0) { // New Connection
     // connect to worker
     int worker_peer_fd = socket(AF_INET, SOCK_STREAM, 0);
+#if defined(__APPLE__)
     static const int ignore = 1;
     if (setsockopt(worker_peer_fd, SOL_SOCKET, SO_NOSIGPIPE, (void*)&ignore, sizeof(ignore)) != 0) {
       printf("setsockopt worker_peer_fd SO_NOSIGPIPE failed, errno: %d\r\n", errno);
       return ;
     }
+#endif
     bool connected = false;
     for(int worker_addr_curosr = 0; g_worker_addrs[worker_addr_curosr] != NULL; ++ worker_addr_curosr) {
       struct sockaddr* worker_addr = g_worker_addrs[worker_addr_curosr];
