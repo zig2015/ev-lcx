@@ -48,7 +48,7 @@ int main(int argc, char* argv[])
     struct sockaddr* worker_addrs[1024] = {0};
     int worker_addr_cursor = 0;
 
-    // TODO: support IPV6 and UDP
+    // TODO: IPV6
     printf("supported family: (AF_INET)%d & socktype: (SOCK_STREAM)%d\r\n", AF_INET, SOCK_STREAM);
     { // process hosts
         char internal_node[NI_MAXHOST] = {0}, worker_node[NI_MAXHOST] = {0};
@@ -126,7 +126,7 @@ int main(int argc, char* argv[])
 }
 
 static struct sockaddr** g_worker_addrs = NULL;
-static SPeerCtx g_internal_peer_ctx = {0};
+static shared_ptr<CPeerCtx> g_internal_peer_ctx;
 
 static void internal_peer_cb(struct ev_loop* event_loop, ev_io* io, int events);
 
@@ -134,307 +134,222 @@ static void internal_peer_cb(struct ev_loop* event_loop, ev_io* io, int events);
  * 连接internal peer,开始事件循环
  */
 static int slave(struct sockaddr** internal_addrs, struct sockaddr** worker_addrs) {
-    g_worker_addrs = worker_addrs;
+  g_worker_addrs = worker_addrs;
 
-    struct ev_loop* event_loop = ev_default_loop(0);
-    if(event_loop == NULL) {
-        printf("get default loop with 0 failed\r\n");
-        return (-1);
+  struct ev_loop* event_loop = ev_default_loop(0);
+  if(event_loop == NULL) {
+    printf("get default loop with 0 failed\r\n");
+    return (-1);
+  }
+
+  { // connect internal
+    int internal_peer = socket(AF_INET, SOCK_STREAM, 0);
+    // ignore sigpipe
+    static const int ignore = 1;
+    if (setsockopt(internal_peer, SOL_SOCKET, SO_NOSIGPIPE, (void*)&ignore, sizeof(ignore)) != 0) {
+      printf("setsockopt internal_peer SO_NOSIGPIPE failed, errno: %d\r\n", errno);
+      return (-1);
     }
+    
+    bool connected = false;
+    for (int internal_addr_cursor = 0; internal_addrs[internal_addr_cursor] != NULL; ++internal_addr_cursor) {
+      struct sockaddr* internal_addr = internal_addrs[internal_addr_cursor];
+      if(connect(internal_peer, internal_addr, sizeof(struct sockaddr)) == -1) {
+	printf("connect internal failed, errno: %d\r\n", errno);
+      } else {
+	// set internal peer to non-block
+	int flags = fcntl(internal_peer, F_GETFL, 0);
+	if(flags == -1) {
+	  printf("fcntl internal_peer F_GETFL failed, errno: %d\r\n", errno);
+	  break;
+	}
+	if(fcntl(internal_peer, F_SETFL, (flags | O_NONBLOCK)) == -1) {
+	  printf("fcntl internal_peer F_SETFL O_NONBLOCK failed, errno: %d\r\n", errno);
+	  break;
+	}
+	
+	g_internal_peer_ctx = shared_ptr<CPeerCtx>(new CPeerCtx(internal_peer, internal_peer, (struct sockaddr*)internal_addr));
+	// register libev, then start
+	g_internal_peer_ctx->initCallback(internal_peer_cb, EV_READ|EV_WRITE);
+	g_internal_peer_ctx->start(event_loop);
 
-    { // connect internal
-         int internal_peer = socket(AF_INET, SOCK_STREAM, 0);
-
-        bool connected = false;
-        for (int internal_addr_cursor = 0; internal_addrs[internal_addr_cursor] != NULL; ++internal_addr_cursor) {
-            struct sockaddr* internal_addr = internal_addrs[internal_addr_cursor];
-            if(connect(internal_peer, internal_addr, sizeof(struct sockaddr)) == -1) {
-                printf("connect internal failed, errno: %d\r\n", errno);
-            } else {
-                // set internal peer to non-block
-                int flags = fcntl(internal_peer, F_GETFL, 0);
-                if(flags == -1) {
-                    printf("fcntl internal_peer F_GETFL failed, errno: %d\r\n", errno);
-                    break;
-                }
-                if(fcntl(internal_peer, F_SETFL, (flags | O_NONBLOCK)) == -1) {
-                    printf("fcntl internal_peer F_SETFL O_NONBLOCK failed, errno: %d\r\n", errno);
-                    break;
-                }
-
-                g_internal_peer_ctx.fd = internal_peer;
-                g_internal_peer_ctx.addr = (*internal_addr);
-                g_internal_peer_ctx.rbuf_size = sizeof(g_internal_peer_ctx.rbuf);
-                g_internal_peer_ctx.rbuf_pos = g_internal_peer_ctx.rbuf_len = 0;
-                g_internal_peer_ctx.wbuf_size = sizeof(g_internal_peer_ctx.wbuf);
-                g_internal_peer_ctx.wbuf_pos = g_internal_peer_ctx.wbuf_len = 0;
-                // register libev
-                ev_io_init(&g_internal_peer_ctx.io, internal_peer_cb, g_internal_peer_ctx.fd, EV_READ|EV_WRITE);
-                ev_io_start(event_loop, &g_internal_peer_ctx.io);
-
-                connected = true;
-                break;
-            }
-        }
-        if(!connected) {
-            printf("sorry, we have tried all addrs, but couldn't connect internal host\r\n");
-            return (-1);
-        }
+	connected = true;
+	break;
+      }
     }
+    if(!connected) {
+      printf("sorry, we have tried all addrs, but couldn't connect internal host\r\n");
+      return (-1);
+    }
+  }
 
-    printf("rolling...\r\n");
-    return (ev_run(event_loop, 0));
+  printf("rolling...\r\n");
+  return (ev_run(event_loop, 0));
 }
 
-static map<int32_t, SPeerCtx*> g_shadow_peer_ctxes; // id: ctx
-static map<int, int32_t> g_shadow_peer_fd2id;
+static map<int32_t, shared_ptr<CPeerCtx> > g_shadow_peer_ctxes; // id: ctx
+static map<int32_t, int32_t> g_shadow_peer_fd2id;
 
 /**
  *
  */
 static void shadow_peer_cb(struct ev_loop* event_loop, ev_io* io, int events) {
-    map<int, int32_t>::iterator shadow_peer_fd2id_ite = g_shadow_peer_fd2id.find(io->fd);
-    if(shadow_peer_fd2id_ite == g_shadow_peer_fd2id.end()) {
-        return ;
-    }
-    map<int32_t, SPeerCtx*>::iterator peer_ctx_ite = g_shadow_peer_ctxes.find(shadow_peer_fd2id_ite->second);
-    if(peer_ctx_ite == g_shadow_peer_ctxes.end()) { // everything is impossible
-        return ;
-    }
-    SPeerCtx* shadow_peer_ctx = peer_ctx_ite->second;
-    if(events & EV_WRITE) {
-        if(shadow_peer_ctx->wbuf_len > 0) {
-            ssize_t bytes_written = write(shadow_peer_ctx->fd, shadow_peer_ctx->wbuf+ shadow_peer_ctx->wbuf_pos, shadow_peer_ctx->wbuf_len);
-            if(bytes_written == -1) { // errno
-                if(errno == EWOULDBLOCK) { // blocked
-                    return ;
-                }
-            } else {
-                shadow_peer_ctx->wbuf_pos += bytes_written;
-                shadow_peer_ctx->wbuf_len -= bytes_written;
-            }
-            // wbuf is used half, align
-            if(shadow_peer_ctx->wbuf_pos > shadow_peer_ctx->wbuf_size/2) {
-                memmove(shadow_peer_ctx->wbuf, shadow_peer_ctx->wbuf+ shadow_peer_ctx->wbuf_pos, shadow_peer_ctx->wbuf_len);
-                shadow_peer_ctx->wbuf_pos = 0;
-            }
-        }
-    }
-    if(events & EV_READ) {
-        size_t bytes2read = shadow_peer_ctx->rbuf_size - (shadow_peer_ctx->rbuf_pos+ shadow_peer_ctx->rbuf_len);
-        ssize_t bytes_read = read(shadow_peer_ctx->fd, shadow_peer_ctx->rbuf+ shadow_peer_ctx->rbuf_pos+ shadow_peer_ctx->rbuf_len, bytes2read);
-        printf("shadow peer buf: %s\r\n", shadow_peer_ctx->rbuf+shadow_peer_ctx->rbuf_pos);
-        if (bytes_read == -1) { // errno
-            if (errno == EAGAIN) { // non-block but data is not ready
-                return ;
-            }
-        } else if (bytes_read == 0) { // eof of a socket???
-            printf("shadow peer is eof?!!!\r\n");
-            char peer_cidr[1024] = {0};
-            inet_ntop(AF_INET, &((struct sockaddr_in*)&shadow_peer_ctx->addr)->sin_addr, peer_cidr, sizeof(peer_cidr));
-            printf("shawdow peer(fd: %d, addr(%s:%d)) is eof?!!!\r\n",
-                   shadow_peer_ctx->fd, peer_cidr, ((struct sockaddr_in*)&shadow_peer_ctx->addr)->sin_port);
-            // flush into internal peer's wbuf
-            size_t internal_peer_wbuf_space = g_internal_peer_ctx.wbuf_size-(g_internal_peer_ctx.wbuf_pos+g_internal_peer_ctx.wbuf_len);
-            // if internal peer's wbuf space is too small, can't flush now
-            if(internal_peer_wbuf_space >= PKG_HEADER_SIZE) {
-                char pkg_header[PKG_HEADER_SIZE] = {0};
-                {
-                    int8_t* pkg_peer_id_bytes = (int8_t*)&shadow_peer_fd2id_ite->second; // assumed little-endian
-                    pkg_header[4] = pkg_peer_id_bytes[3]; pkg_header[5] = pkg_peer_id_bytes[2];
-                    pkg_header[6] = pkg_peer_id_bytes[1]; pkg_header[7] = pkg_peer_id_bytes[0];
-                }
-                pkg_header[8] = 'L'; pkg_header[9] = 'C'; // LC
-                memcpy(g_internal_peer_ctx.wbuf+g_internal_peer_ctx.wbuf_pos+g_internal_peer_ctx.wbuf_len, pkg_header, PKG_HEADER_SIZE);
-                g_internal_peer_ctx.wbuf_len += PKG_HEADER_SIZE;
+  map<int, int32_t>::iterator shadow_peer_fd2id_ite = g_shadow_peer_fd2id.find(io->fd);
+  if(shadow_peer_fd2id_ite == g_shadow_peer_fd2id.end()) {
+    return ;
+  }
+  map<int32_t, shared_ptr<CPeerCtx> >::iterator peer_ctx_ite = g_shadow_peer_ctxes.find(shadow_peer_fd2id_ite->second);
+  if(peer_ctx_ite == g_shadow_peer_ctxes.end()) { // everything is possible
+    return ;
+  }
+  shared_ptr<CPeerCtx> shadow_peer_ctx = peer_ctx_ite->second;
+  if(events & EV_WRITE) {
+    shadow_peer_ctx->flush();
+  }
+  if(events & EV_READ) {
+    int draw_result = shadow_peer_ctx->draw();
+    if (draw_result == -1) { // read next time
+      return ;
+    } else if (draw_result == 0) { // eof of a socket???
+      printf("shadow peer is eof?!!!\r\n");
+      char peer_cidr[1024] = {0};
+      inet_ntop(AF_INET, &((struct sockaddr_in*)shadow_peer_ctx->addr())->sin_addr, peer_cidr, sizeof(peer_cidr));
+      printf("shawdow peer(fd: %d, addr(%s:%d)) is eof?!!!\r\n",
+	     shadow_peer_ctx->fd(), peer_cidr, ((struct sockaddr_in*)shadow_peer_ctx->addr())->sin_port);
+      // flush into internal peer's wbuf
+      char lc_pkg_header[PKG_HEADER_SIZE] = {0};
+      {
+	int8_t* pkg_peer_id_bytes = (int8_t*)&shadow_peer_fd2id_ite->second; // assumed little-endian
+	lc_pkg_header[4] = pkg_peer_id_bytes[3]; lc_pkg_header[5] = pkg_peer_id_bytes[2];
+	lc_pkg_header[6] = pkg_peer_id_bytes[1]; lc_pkg_header[7] = pkg_peer_id_bytes[0];
+      }
+      lc_pkg_header[8] = 'L'; lc_pkg_header[9] = 'C'; // LC
+      g_internal_peer_ctx->pushWbuf(lc_pkg_header, PKG_HEADER_SIZE);
+      
+      g_shadow_peer_ctxes.erase(shadow_peer_fd2id_ite->second);
+      g_shadow_peer_fd2id.erase(shadow_peer_ctx->fd());
+    } else {
+      // flush into internal peer's wbuf
+      char dp_peer_pkg_header[PKG_HEADER_SIZE] = {0}; // big-endian
+      int32_t peer_pkg_payload_len = shadow_peer_ctx->rbufLen();
+      {
+	int8_t *pkg_payload_len_bytes = (int8_t *) &peer_pkg_payload_len; // assumed little-endian now
+	dp_peer_pkg_header[0] = pkg_payload_len_bytes[3];
+	dp_peer_pkg_header[1] = pkg_payload_len_bytes[2];
+	dp_peer_pkg_header[2] = pkg_payload_len_bytes[1];
+	dp_peer_pkg_header[3] = pkg_payload_len_bytes[0];
+	int32_t shadow_peer_id = shadow_peer_ctx->id();
+	int8_t *peer_id_bytes = (int8_t *) &shadow_peer_id; // assumed little-endian
+	dp_peer_pkg_header[4] = peer_id_bytes[3];
+	dp_peer_pkg_header[5] = peer_id_bytes[2];
+	dp_peer_pkg_header[6] = peer_id_bytes[1];
+	dp_peer_pkg_header[7] = peer_id_bytes[0];
+      }
+      dp_peer_pkg_header[8] = 'D'; dp_peer_pkg_header[9] = 'P'; // Data Payload
+      g_internal_peer_ctx->pushWbuf(dp_peer_pkg_header, PKG_HEADER_SIZE);
+      g_internal_peer_ctx->pushWbuf(shadow_peer_ctx->rbuf(), peer_pkg_payload_len);
+    
 
-                ev_io_stop(event_loop, io);
-                close(shadow_peer_ctx->fd);
-                shadow_peer_ctx->fd = 0;
-
-                g_shadow_peer_fd2id.erase(shadow_peer_ctx->fd);
-                g_shadow_peer_ctxes.erase(shadow_peer_fd2id_ite->second);
-            }
-        } else {
-            shadow_peer_ctx->rbuf_len += bytes_read;
-
-            // flush into internal peer's wbuf
-            size_t internal_peer_wbuf_space =
-                    g_internal_peer_ctx.wbuf_size - (g_internal_peer_ctx.wbuf_pos + g_internal_peer_ctx.wbuf_len);
-            size_t shadow_peer_rbuf_sendable_bytes = min(internal_peer_wbuf_space-PKG_HEADER_SIZE, shadow_peer_ctx->rbuf_len);
-            // if internal peer's wbuf space is too small, can't flush now
-            if (internal_peer_wbuf_space > PKG_HEADER_SIZE) {
-                char peer_pkg_header[PKG_HEADER_SIZE] = {0}; // big-endian
-                int32_t peer_pkg_payload_len = shadow_peer_rbuf_sendable_bytes;
-                {
-                    int8_t *pkg_payload_len_bytes = (int8_t *) &peer_pkg_payload_len; // assumed little-endian now
-                    peer_pkg_header[0] = pkg_payload_len_bytes[3];
-                    peer_pkg_header[1] = pkg_payload_len_bytes[2];
-                    peer_pkg_header[2] = pkg_payload_len_bytes[1];
-                    peer_pkg_header[3] = pkg_payload_len_bytes[0];
-                    int8_t *peer_id_bytes = (int8_t *) &shadow_peer_ctx->fd; // assumed little-endian
-                    peer_pkg_header[4] = peer_id_bytes[3];
-                    peer_pkg_header[5] = peer_id_bytes[2];
-                    peer_pkg_header[6] = peer_id_bytes[1];
-                    peer_pkg_header[7] = peer_id_bytes[0];
-                }
-                peer_pkg_header[8] = 'D'; peer_pkg_header[9] = 'P'; // Data Payload
-                memcpy(g_internal_peer_ctx.wbuf + g_internal_peer_ctx.wbuf_pos+g_internal_peer_ctx.wbuf_len, peer_pkg_header, PKG_HEADER_SIZE);
-                g_internal_peer_ctx.wbuf_len += PKG_HEADER_SIZE;
-                memcpy(g_internal_peer_ctx.wbuf + g_internal_peer_ctx.wbuf_pos + g_internal_peer_ctx.wbuf_len,
-                       shadow_peer_ctx->rbuf + shadow_peer_ctx->rbuf_pos, shadow_peer_rbuf_sendable_bytes);
-                g_internal_peer_ctx.wbuf_len += shadow_peer_rbuf_sendable_bytes;
-
-                shadow_peer_ctx->rbuf_pos += shadow_peer_rbuf_sendable_bytes;
-                shadow_peer_ctx->rbuf_len -= shadow_peer_rbuf_sendable_bytes;
-            }
-            // peer's rbuf used half, align
-            if (shadow_peer_ctx->rbuf_pos > shadow_peer_ctx->rbuf_size / 2) {
-                memmove(shadow_peer_ctx->rbuf, shadow_peer_ctx->rbuf + shadow_peer_ctx->rbuf_pos, shadow_peer_ctx->rbuf_len);
-                shadow_peer_ctx->rbuf_pos = 0;
-            }
-        } // read returns
-    } // events & EV_READ
+      shadow_peer_ctx->purgeRbuf();
+    } // read returns
+  } // events & EV_READ
 }
 
 static void consume_internal_peer_pkg(struct ev_loop* event_loop) {
-    // enough data for a pkg
-    if(g_internal_peer_ctx.rbuf_len < PKG_HEADER_SIZE) return ; // nothing to do
-    int8_t* pkg_buf = (int8_t*)g_internal_peer_ctx.rbuf+g_internal_peer_ctx.rbuf_pos;
-    int32_t pkg_payload_len = -1;
-    int32_t pkg_shadow_peer_id = -1;
-    { // parse pkg payload len and shadow peer id
-        // TODO: handle endian
-        int8_t* pkg_payload_len_bytes = (int8_t*)&pkg_payload_len;
-        int8_t*pkg_shadow_peer_id_bytes = (int8_t*)&pkg_shadow_peer_id;
-        pkg_payload_len_bytes[0] = pkg_buf[3]; pkg_payload_len_bytes[1] = pkg_buf[2];
-        pkg_payload_len_bytes[2] = pkg_buf[1]; pkg_payload_len_bytes[3] = pkg_buf[0];
-        pkg_shadow_peer_id_bytes[0] = pkg_buf[7]; pkg_shadow_peer_id_bytes[1] = pkg_buf[6];
-        pkg_shadow_peer_id_bytes[2] = pkg_buf[5]; pkg_shadow_peer_id_bytes[3] = pkg_buf[4];
+  // enough data for a pkg
+  size_t rbuf_len = g_internal_peer_ctx->rbufLen();
+  const char* rbuf = g_internal_peer_ctx->rbuf();
+  if (rbuf_len < PKG_HEADER_SIZE) return ; // nothing to do
+  int32_t pkg_payload_len = -1;
+  int32_t pkg_shadow_peer_id = -1;
+  { // parse pkg payload len and shadow peer id
+    // TODO: handle endian
+    int8_t* pkg_payload_len_bytes = (int8_t*)&pkg_payload_len;
+    int8_t*pkg_shadow_peer_id_bytes = (int8_t*)&pkg_shadow_peer_id;
+    pkg_payload_len_bytes[0] = rbuf[3]; pkg_payload_len_bytes[1] = rbuf[2];
+    pkg_payload_len_bytes[2] = rbuf[1]; pkg_payload_len_bytes[3] = rbuf[0];
+    pkg_shadow_peer_id_bytes[0] = rbuf[7]; pkg_shadow_peer_id_bytes[1] = rbuf[6];
+    pkg_shadow_peer_id_bytes[2] = rbuf[5]; pkg_shadow_peer_id_bytes[3] = rbuf[4];
+  }
+  if(rbuf_len < PKG_HEADER_SIZE+pkg_payload_len) return ; // data is still not enough
+  // determine cmd
+  int bytes_consumed = PKG_HEADER_SIZE+pkg_payload_len; // how many bytes consumed this time
+  if(memcmp(rbuf+8, "NC", 2) == 0) { // New Connection
+    // connect to worker
+    int worker_peer_fd = socket(AF_INET, SOCK_STREAM, 0);
+    static const int ignore = 1;
+    if (setsockopt(worker_peer_fd, SOL_SOCKET, SO_NOSIGPIPE, (void*)&ignore, sizeof(ignore)) != 0) {
+      printf("setsockopt worker_peer_fd SO_NOSIGPIPE failed, errno: %d\r\n", errno);
+      return ;
     }
-    if(g_internal_peer_ctx.rbuf_len < PKG_HEADER_SIZE+pkg_payload_len) return ; // data is still not enough
-    // determine cmd
-    int bytes_consumed = PKG_HEADER_SIZE+pkg_payload_len; // how many bytes consumed this time
-    if(memcmp(pkg_buf+8, "NC", 2) == 0) { // New Connection
-        // connect to worker
-        int worker_peer_fd = socket(AF_INET, SOCK_STREAM, 0);
-        bool connected = false;
-        for(int worker_addr_curosr = 0; g_worker_addrs[worker_addr_curosr] != NULL; ++ worker_addr_curosr) {
-            struct sockaddr* worker_addr = g_worker_addrs[worker_addr_curosr];
-            if(connect(worker_peer_fd, worker_addr, sizeof(struct sockaddr)) == -1) {
-                printf("connect worker failed, errno: %d\r\n", errno);
-            } else {
-                // set worker peer to non-block
-                int flags = fcntl(worker_peer_fd, F_GETFL, 0);
-                if(flags == -1) {
-                    printf("fcntl worker_peer F_GETFL failed, errno: %d\r\n", errno);
-                    break;
-                }
-                if(fcntl(worker_peer_fd, F_SETFL, (flags | O_NONBLOCK)) == -1) {
-                    printf("fcntl worker_peer F_SETFL O_NONBLOCK failed, errno: %d\r\n", errno);
-                    break;
-                }
+    bool connected = false;
+    for(int worker_addr_curosr = 0; g_worker_addrs[worker_addr_curosr] != NULL; ++ worker_addr_curosr) {
+      struct sockaddr* worker_addr = g_worker_addrs[worker_addr_curosr];
+      if(connect(worker_peer_fd, worker_addr, sizeof(struct sockaddr)) == -1) {
+	printf("connect worker failed, errno: %d\r\n", errno);
+      } else {
+	// set worker peer to non-block
+	int flags = fcntl(worker_peer_fd, F_GETFL, 0);
+	if(flags == -1) {
+	  printf("fcntl worker_peer F_GETFL failed, errno: %d\r\n", errno);
+	  break;
+	}
+	if(fcntl(worker_peer_fd, F_SETFL, (flags | O_NONBLOCK)) == -1) {
+	  printf("fcntl worker_peer F_SETFL O_NONBLOCK failed, errno: %d\r\n", errno);
+	  break;
+	}
 
-                g_shadow_peer_fd2id[worker_peer_fd] = pkg_shadow_peer_id;
-                if(g_shadow_peer_ctxes.find(pkg_shadow_peer_id) == g_shadow_peer_ctxes.end()) {
-                    g_shadow_peer_ctxes[pkg_shadow_peer_id] = (SPeerCtx*)calloc(1, sizeof(SPeerCtx));
-                }
-                SPeerCtx* shadow_peer_ctx = g_shadow_peer_ctxes[pkg_shadow_peer_id];
-                shadow_peer_ctx->fd = worker_peer_fd;
-                shadow_peer_ctx->addr = (*worker_addr);
-                shadow_peer_ctx->rbuf_size = sizeof(shadow_peer_ctx->rbuf);
-                shadow_peer_ctx->rbuf_pos = shadow_peer_ctx->rbuf_len = 0;
-                shadow_peer_ctx->wbuf_size = sizeof(shadow_peer_ctx->wbuf);
-                shadow_peer_ctx->wbuf_pos = shadow_peer_ctx->wbuf_len = 0;
-                // register libev
-                ev_io_init(&shadow_peer_ctx->io, shadow_peer_cb, shadow_peer_ctx->fd, EV_READ|EV_WRITE);
-                ev_io_start(event_loop, &shadow_peer_ctx->io);
-
-                connected = true;
-                break;
-            }
-        }
-        if(!connected) {
-            printf("sorry, we have tried all addrs, but couldn't connect worker host\r\n");
-            return ;
-        } else {
-            printf("New Connection handled\r\n");
-        }
+	g_shadow_peer_fd2id[worker_peer_fd] = pkg_shadow_peer_id;
+	shared_ptr<CPeerCtx> shadow_peer_ctx = shared_ptr<CPeerCtx>(new CPeerCtx(worker_peer_fd, pkg_shadow_peer_id, (struct sockaddr*)worker_addr));
+	g_shadow_peer_ctxes[shadow_peer_ctx->id()] = shadow_peer_ctx;
+	// register libev, then start
+	shadow_peer_ctx->initCallback(shadow_peer_cb, EV_READ|EV_WRITE);
+	shadow_peer_ctx->start(event_loop);
+	
+	connected = true;
+	break;
+      }
+    }
+    if(!connected) {
+      printf("sorry, we have tried all addrs, but couldn't connect worker host\r\n");
     } else {
-        map<int32_t, SPeerCtx*>::iterator pkg_shadow_peer_ctx_ite = g_shadow_peer_ctxes.find(pkg_shadow_peer_id);
-        if (pkg_shadow_peer_ctx_ite != g_shadow_peer_ctxes.end()) { // dest peer is gone?!
-            SPeerCtx* pkg_shadow_peer_ctx = pkg_shadow_peer_ctx_ite->second;
-            if (memcmp(pkg_buf + 8, "DP", 2) == 0) { // Data Payload
-                // flush payload to external peer's wbuf
-                size_t pkg_shadow_peer_wbuf_space = pkg_shadow_peer_ctx->wbuf_size -
-                                                      (pkg_shadow_peer_ctx->wbuf_pos + pkg_shadow_peer_ctx->wbuf_len);
-                // external peer's wbuf space is too small, can't flush now
-                if (pkg_shadow_peer_wbuf_space < pkg_payload_len) {
-                    bytes_consumed = 0;
-                    return ;
-                } else {
-                    memcpy(pkg_shadow_peer_ctx->wbuf + pkg_shadow_peer_ctx->wbuf_pos + pkg_shadow_peer_ctx->wbuf_len,
-                           pkg_buf + PKG_HEADER_SIZE, pkg_payload_len);
-                    pkg_shadow_peer_ctx->wbuf_len += pkg_payload_len;
-                }
-            } else if (memcmp(pkg_buf + 8, "LC", 2) == 0) { // Lost Connection
-                g_shadow_peer_fd2id.erase(pkg_shadow_peer_ctx->fd);
-                ev_io_stop(event_loop, &pkg_shadow_peer_ctx->io);
-                close(pkg_shadow_peer_ctx->fd);
-                g_shadow_peer_ctxes.erase(pkg_shadow_peer_ctx_ite);
-            }
-        }
+      printf("New Connection handled, shadow peer id: %d\r\n", pkg_shadow_peer_id);
     }
-    g_internal_peer_ctx.rbuf_pos += bytes_consumed;
-    g_internal_peer_ctx.rbuf_len -= bytes_consumed;
-    // rbuf is used half, align
-    if(g_internal_peer_ctx.rbuf_pos > g_internal_peer_ctx.rbuf_size/2) {
-        memmove(g_internal_peer_ctx.rbuf, g_internal_peer_ctx.rbuf+g_internal_peer_ctx.rbuf_pos, g_internal_peer_ctx.rbuf_len);
-        g_internal_peer_ctx.rbuf_pos = 0;
+  } else {
+    map<int32_t, shared_ptr<CPeerCtx> >::iterator pkg_shadow_peer_ctx_ite = g_shadow_peer_ctxes.find(pkg_shadow_peer_id);
+    if (pkg_shadow_peer_ctx_ite != g_shadow_peer_ctxes.end()) { // dest peer is gone?!
+      shared_ptr<CPeerCtx> pkg_shadow_peer_ctx = pkg_shadow_peer_ctx_ite->second;
+      if (memcmp(rbuf + 8, "DP", 2) == 0) { // Data Payload
+	// flush payload to shadow peer's wbuf
+	pkg_shadow_peer_ctx->pushWbuf(rbuf+PKG_HEADER_SIZE, pkg_payload_len);
+      } else if (memcmp(rbuf + 8, "LC", 2) == 0) { // Lost Connection
+	g_shadow_peer_ctxes.erase(pkg_shadow_peer_ctx_ite);
+	g_shadow_peer_fd2id.erase(pkg_shadow_peer_ctx->fd());
+      }
     }
-    consume_internal_peer_pkg(event_loop);
+  }
+  g_internal_peer_ctx->purgeRbuf(bytes_consumed);
+    
+  consume_internal_peer_pkg(event_loop);
 }
 static void internal_peer_cb(struct ev_loop* event_loop, ev_io* io, int events) {
-    if(events & EV_WRITE) {
-        if (g_internal_peer_ctx.wbuf_len > 0) {
-            ssize_t bytes_written = write(io->fd, g_internal_peer_ctx.wbuf + g_internal_peer_ctx.wbuf_pos,
-                                          g_internal_peer_ctx.wbuf_len);
-            if (bytes_written == -1) { // errno
-                if (errno == EWOULDBLOCK) { // blocked
-                    return;
-                }
-            } else {
-                g_internal_peer_ctx.wbuf_pos += bytes_written;
-                g_internal_peer_ctx.wbuf_len -= bytes_written;
-            }
-            // wbuf is used half, align
-            if (g_internal_peer_ctx.wbuf_pos > g_internal_peer_ctx.wbuf_size / 2) {
-                memmove(g_internal_peer_ctx.wbuf, g_internal_peer_ctx.wbuf + g_internal_peer_ctx.wbuf_pos,
-                        g_internal_peer_ctx.wbuf_len);
-                g_internal_peer_ctx.wbuf_pos = 0;
-            }
-        }
-    }
-    if(events & EV_READ) {
-        size_t bytes2read = g_internal_peer_ctx.rbuf_size - (g_internal_peer_ctx.rbuf_pos+g_internal_peer_ctx.rbuf_len);
-        ssize_t bytes_read = read(g_internal_peer_ctx.fd, g_internal_peer_ctx.rbuf+g_internal_peer_ctx.rbuf_pos+g_internal_peer_ctx.rbuf_len, bytes2read);
-        if (bytes_read == -1) { // errno
-            if (errno == EAGAIN) { // non-block but data is not ready
-                return ;
-            }
-        } else if (bytes_read == 0) { // eof of a socket?!!
-            char peer_cidr[1024] = {0};
-            inet_ntop(AF_INET, &((struct sockaddr_in*)&g_internal_peer_ctx.addr)->sin_addr, peer_cidr, sizeof(peer_cidr));
-            printf("internal peer(fd: %d, addr(%s:%d)) is eof?!!!\r\n",
-                   io->fd, peer_cidr, ((struct sockaddr_in*)&g_internal_peer_ctx.addr)->sin_port);
-            ev_io_stop(event_loop, io);
-            g_internal_peer_ctx.fd = 0;
+  if(events & EV_WRITE) {
+    g_internal_peer_ctx->flush();
+  }
+  if(events & EV_READ) {
+    int draw_result = g_internal_peer_ctx->draw();
+    if (draw_result == -1) { // errno
+      return ;
+    } else if (draw_result == 0) { // eof of a socket?!!
+      char peer_cidr[1024] = {0};
+      inet_ntop(AF_INET, &((struct sockaddr_in*)g_internal_peer_ctx->addr())->sin_addr, peer_cidr, sizeof(peer_cidr));
+      printf("internal peer(fd: %d, addr(%s:%d)) is eof?!!!\r\n",
+	     io->fd, peer_cidr, ((struct sockaddr_in*)g_internal_peer_ctx->addr())->sin_port);
+      g_internal_peer_ctx.reset();
 
-            ev_break(event_loop, EVBREAK_ALL);
-        } else {
-            g_internal_peer_ctx.rbuf_len += bytes_read;
-
-            consume_internal_peer_pkg(event_loop);
-        }
+      ev_break(event_loop, EVBREAK_ALL);
+    } else {
+      consume_internal_peer_pkg(event_loop);
     }
+  }
 }
