@@ -30,6 +30,8 @@ static int slave(struct sockaddr* internal_addrs[], struct sockaddr* worker_addr
 
 int main(int argc, char* argv[])
 {
+  printf("Build on %s-%s. \r\nPassez un bon moment. \r\nzig(gamer.ziiig@gmail.com)\r\n", __DATE__, __TIME__);
+  printf("---------------------------------------\r\n");
     if(argc != 3) {
         printf("usage: program internal_host:internal_port worker_host:worker_port\r\n**host can by ip or domain**\r\n");
         return (-1);

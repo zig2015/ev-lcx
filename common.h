@@ -77,9 +77,12 @@ public:
      * write out wbuf
      */
     int flush() {
+
+      printf("\rid:%4d(fd:%4d) flush once, wbuf_len:%4zu", this->m_id, this->m_fd, this->m_wbuf_len);
       if (this->m_wbuf_len <= 0) {
 	return (-1);
       }
+      printf("\r\nid:%4d(fd:%4d) flush once, wbuf_len:%4zu\r\n", this->m_id, this->m_fd, this->m_wbuf_len);
 #if defined(__linux__)
       int result = send(this->m_io->fd, this->m_wbuf, this->m_wbuf_len, MSG_NOSIGNAL);
 #elif defined(__APPLE__)

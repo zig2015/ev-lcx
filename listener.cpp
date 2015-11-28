@@ -26,6 +26,8 @@ static int listener(int external_port, int internal_port);
 
 int main(int argc, char** argv)
 {
+  printf("Build on %s-%s. \r\nPassez un bon moment. \r\nzig(gamer.ziiig@gmail.com)\r\n", __DATE__, __TIME__);
+  printf("---------------------------------------\r\n");
     if(argc != 3) {
         printf("usage: program external_port internal_port\r\n");
         return (-1);
@@ -224,7 +226,24 @@ static void external_sock_cb(struct ev_loop* event_loop, ev_io* io, int events) 
             return ;
         }
     }
-
+#if defined(__APPLE__)
+    // ignore sigpipe
+    static const int ignore = 1;
+    if (setsockopt(new_external_peer_fd, SOL_SOCKET, SO_NOSIGPIPE, (void*)&ignore, sizeof(ignore)) != 0) {
+      printf("setsockopt external_sock SO_NOSIGPIPE failed, errno: %d\r\n", errno);
+      return ;
+    }
+#endif
+    // set non-block
+    int flags = fcntl(new_external_peer_fd, F_GETFL, 0);
+    if(flags == -1) {
+        printf("fcntl new_external_peer_fd F_GETFL failed, errno: %d\r\n", errno);
+        return ;
+    }
+    if(fcntl(new_external_peer_fd, F_SETFL, (flags | O_NONBLOCK)) != 0) {
+        printf("fcntl new_external_peer_fd F_SETFL failed, errno: %d\r\n", errno);
+	return ;
+    }
     
     shared_ptr<CPeerCtx> new_external_peer_ctx = shared_ptr<CPeerCtx>(new CPeerCtx(new_external_peer_fd, new_external_peer_fd, (struct sockaddr*)&new_external_peer_addr_in));
     g_external_peer_ctxes[new_external_peer_ctx->id()] = new_external_peer_ctx;
@@ -324,6 +343,24 @@ static void internal_sock_cb(struct ev_loop* event_loop, ev_io* io, int events) 
       return ;
     }
   }
+#if defined(__APPLE__)
+    // ignore sigpipe
+    static const int ignore = 1;
+    if (setsockopt(peer_fd, SOL_SOCKET, SO_NOSIGPIPE, (void*)&ignore, sizeof(ignore)) != 0) {
+      printf("setsockopt internal sock peer SO_NOSIGPIPE failed, errno: %d\r\n", errno);
+      return ;
+    }
+#endif
+    // set non-block
+    int flags = fcntl(peer_fd, F_GETFL, 0);
+    if(flags == -1) {
+        printf("fcntl internal sock peer F_GETFL failed, errno: %d\r\n", errno);
+        return ;
+    }
+    if(fcntl(peer_fd, F_SETFL, (flags | O_NONBLOCK)) != 0) {
+        printf("fcntl internal sock peer F_SETFL failed, errno: %d\r\n", errno);
+	return ;
+    }  
   // TODO: i think we need some auth
   g_internal_peer_ctx = shared_ptr<CPeerCtx>(new CPeerCtx(peer_fd, peer_fd, (struct sockaddr*)&internal_peer_addr_in));
   // register peer to libev, then start
