@@ -321,6 +321,8 @@ static void consume_internal_peer_pkg(struct ev_loop* event_loop) {
     } else {
       printf("New Connection handled, shadow peer id: %d\r\n", pkg_shadow_peer_id);
     }
+  } else if (memcmp(rbuf+8, "KL", 2) == 0) { // Keep-Live
+    g_internal_peer_ctx->pushWbuf(rbuf, PKG_HEADER_SIZE);
   } else {
     map<int32_t, shared_ptr<CPeerCtx> >::iterator pkg_shadow_peer_ctx_ite = g_shadow_peer_ctxes.find(pkg_shadow_peer_id);
     if (pkg_shadow_peer_ctx_ite != g_shadow_peer_ctxes.end()) { // dest peer is gone?!
@@ -328,9 +330,6 @@ static void consume_internal_peer_pkg(struct ev_loop* event_loop) {
       if (memcmp(rbuf + 8, "DP", 2) == 0) { // Data Payload
 	// flush payload to shadow peer's wbuf
 	pkg_shadow_peer_ctx->pushWbuf(rbuf+PKG_HEADER_SIZE, pkg_payload_len);
-      } else if (memcmp(rbuf+8, "KL", 2) == 0) { // Keep-Live
-	printf("\r\n****Keep-Live****\r\n");
-	g_internal_peer_ctx->pushWbuf(rbuf, PKG_HEADER_SIZE);
       } else if (memcmp(rbuf+8, "LC", 2) == 0) { // Lost Connection
 	g_shadow_peer_ctxes.erase(pkg_shadow_peer_ctx_ite);
 	g_shadow_peer_fd2id.erase(pkg_shadow_peer_ctx->fd());
