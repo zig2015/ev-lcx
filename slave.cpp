@@ -30,7 +30,7 @@ static int slave(struct sockaddr* internal_addrs[], struct sockaddr* worker_addr
 
 int main(int argc, char* argv[])
 {
-  printf("Build on %s-%s. \r\nPassez un bon moment. \r\nzig(gamer.ziiig@gmail.com)\r\n", __DATE__, __TIME__);
+  printf("Build on %s-%s. \r\nPassez un bon moment. \r\nshaw(shawhen2012@hotmail.com)\r\n", __DATE__, __TIME__);
   printf("---------------------------------------\r\n");
     if(argc != 3) {
         printf("usage: program internal_host:internal_port worker_host:worker_port\r\n**host can by ip or domain**\r\n");
@@ -328,7 +328,10 @@ static void consume_internal_peer_pkg(struct ev_loop* event_loop) {
       if (memcmp(rbuf + 8, "DP", 2) == 0) { // Data Payload
 	// flush payload to shadow peer's wbuf
 	pkg_shadow_peer_ctx->pushWbuf(rbuf+PKG_HEADER_SIZE, pkg_payload_len);
-      } else if (memcmp(rbuf + 8, "LC", 2) == 0) { // Lost Connection
+      } else if (memcmp(rbuf+8, "KL", 2) == 0) { // Keep-Live
+	printf("\r\n****Keep-Live****\r\n");
+	g_internal_peer_ctx->pushWbuf(rbuf, PKG_HEADER_SIZE);
+      } else if (memcmp(rbuf+8, "LC", 2) == 0) { // Lost Connection
 	g_shadow_peer_ctxes.erase(pkg_shadow_peer_ctx_ite);
 	g_shadow_peer_fd2id.erase(pkg_shadow_peer_ctx->fd());
       }

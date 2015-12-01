@@ -14,6 +14,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <assert.h>
 
 #include <map>
 #include <memory>
@@ -26,7 +27,7 @@ static int listener(int external_port, int internal_port);
 
 int main(int argc, char** argv)
 {
-  printf("Build on %s-%s. \r\nPassez un bon moment. \r\nzig(gamer.ziiig@gmail.com)\r\n", __DATE__, __TIME__);
+  printf("Build on %s-%s. \r\nPassez un bon moment. \r\nshaw(shawhen2012@hotmail.com)\r\n", __DATE__, __TIME__);
   printf("---------------------------------------\r\n");
     if(argc != 3) {
         printf("usage: program external_port internal_port\r\n");
@@ -46,6 +47,9 @@ int main(int argc, char** argv)
 static void external_sock_cb(struct ev_loop* event_loop, ev_io* io, int events);
 static void internal_sock_cb(struct ev_loop* event_loop, ev_io* io, int events);
 
+static ev_timer g_kp_timer;
+static void keep_live_cb(struct ev_loop* event_loop, ev_timer* timer, int events);
+
 static int listener(const int external_port, const int internal_port) {
     // get a event loop
     struct ev_loop* event_loop = ev_default_loop(0);
@@ -53,6 +57,8 @@ static int listener(const int external_port, const int internal_port) {
         printf("get default loop with 0 failed\r\n");
         return (-1);
     }
+    // init keep-live timer
+    ev_init(&g_kp_timer, keep_live_cb);
     // allocate socks
     int external_sock = socket(AF_INET, SOCK_STREAM, 0);
     if(external_sock == -1) {
@@ -269,6 +275,30 @@ static void external_sock_cb(struct ev_loop* event_loop, ev_io* io, int events) 
     g_internal_peer_ctx->pushWbuf(nc_pkg_header, PKG_HEADER_SIZE);
 }
 
+static const ev_tstamp g_kp_timeout = 60;
+static ev_tstamp g_last_activity = 0;
+static void keep_live_cb(struct ev_loop* event_loop, ev_timer* timer, int events) {
+  ev_tstamp after = (g_last_activity-ev_now(event_loop)) + g_kp_timeout;
+  if (after < 0) { // died
+    printf("\r\ninternal peer has died\r\n");
+    g_internal_peer_ctx.reset();
+  } else {
+    ev_timer_set(timer, g_kp_timeout, 0);
+    ev_timer_start(event_loop, timer);
+
+    char kp_pkg_header[PKG_HEADER_SIZE] = {0};
+    {
+      int32_t internal_peer_id = g_internal_peer_ctx->id();
+      int8_t* internal_peer_id_bytes = (int8_t*)&internal_peer_id;
+      // todo: assumed host is little-endian
+      kp_pkg_header[4] = internal_peer_id_bytes[3]; kp_pkg_header[5] = internal_peer_id_bytes[2];
+      kp_pkg_header[6] = internal_peer_id_bytes[1]; kp_pkg_header[7] = internal_peer_id_bytes[0];
+    }
+    kp_pkg_header[8] = 'K'; kp_pkg_header[9] = 'L'; // Keep-Live
+    g_internal_peer_ctx->pushWbuf(kp_pkg_header, PKG_HEADER_SIZE);
+  }
+}
+
 // TODO: if a external peer is slow to send, then the internal peer read will be blocked
 
 static void consume_internal_peer_pkg(struct ev_loop* event_loop) {
@@ -296,7 +326,9 @@ static void consume_internal_peer_pkg(struct ev_loop* event_loop) {
     if(memcmp(rbuf+8, "DP", 2) == 0) { // Data Payload
       // flush payload to external peer's wbuf
       pkg_external_peer_ctx->pushWbuf(rbuf+PKG_HEADER_SIZE, pkg_payload_len);
-    } else if(memcmp(rbuf+8, "LC", 2) == 0) { // Lost Connection
+    } else if (memcmp(rbuf+8, "KP", 2) == 0) { // Keep-Live
+      ;
+    } else if (memcmp(rbuf+8, "LC", 2) == 0) { // Lost Connection
       g_external_peer_ctxes.erase(pkg_external_peer_ctx_ite);
     }
   }
@@ -311,7 +343,7 @@ static void internal_peer_cb(struct ev_loop* event_loop, ev_io* io, int events) 
   if(events & EV_READ) {
     int draw_result = g_internal_peer_ctx->draw();
     if (draw_result == -1) { // read next time
-
+      return ;
     } else if (draw_result == 0) { // eof of a socket?!!
       char peer_cidr[1024] = {0};
       inet_ntop(AF_INET, &((const struct sockaddr_in*)g_internal_peer_ctx->addr())->sin_addr, peer_cidr, sizeof(peer_cidr));
@@ -320,6 +352,7 @@ static void internal_peer_cb(struct ev_loop* event_loop, ev_io* io, int events) 
       g_internal_peer_ctx.reset();
       // TODO: clear current external peers
     } else {
+      g_last_activity = ev_now(event_loop);
       consume_internal_peer_pkg(event_loop);
     }
   }
@@ -366,6 +399,11 @@ static void internal_sock_cb(struct ev_loop* event_loop, ev_io* io, int events) 
   // register peer to libev, then start
   g_internal_peer_ctx->initCallback(internal_peer_cb, EV_READ|EV_WRITE);
   g_internal_peer_ctx->start(event_loop);
+
+  struct ev_loop* loop = ev_default_loop(0);
+  assert(loop);
+  g_last_activity = ev_now(EV_A);
+  keep_live_cb(loop, &g_kp_timer, 0);
 
   char peer_cidr[1024] = {0};
   if(inet_ntop(AF_INET, &internal_peer_addr_in.sin_addr, peer_cidr, sizeof(peer_cidr)) == NULL) {
