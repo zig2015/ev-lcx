@@ -181,15 +181,17 @@ static void external_peer_cb(struct ev_loop* event_loop, ev_io* io, int events) 
       inet_ntop(AF_INET, &((struct sockaddr_in*)external_peer_ctx->addr())->sin_addr, peer_cidr, sizeof(peer_cidr));
       printf("external peer(fd: %d, addr(%s:%d)) is eof?!!!\r\n", io->fd, peer_cidr, ((struct sockaddr_in*)external_peer_ctx->addr())->sin_port);
 
-      char lc_pkg_header[PKG_HEADER_SIZE] = {0};
-      {
-	int32_t peer_id = external_peer_ctx->id();
-	int8_t* pkg_peer_id_bytes = (int8_t*)&peer_id; // assumed little-endian
-	lc_pkg_header[4] = pkg_peer_id_bytes[3]; lc_pkg_header[5] = pkg_peer_id_bytes[2];
-	lc_pkg_header[6] = pkg_peer_id_bytes[1]; lc_pkg_header[7] = pkg_peer_id_bytes[0];
+      if (g_internal_peer_ctx) {
+	char lc_pkg_header[PKG_HEADER_SIZE] = {0};
+	{
+	  int32_t peer_id = external_peer_ctx->id();
+	  int8_t* pkg_peer_id_bytes = (int8_t*)&peer_id; // assumed little-endian
+	  lc_pkg_header[4] = pkg_peer_id_bytes[3]; lc_pkg_header[5] = pkg_peer_id_bytes[2];
+	  lc_pkg_header[6] = pkg_peer_id_bytes[1]; lc_pkg_header[7] = pkg_peer_id_bytes[0];
+	}
+	lc_pkg_header[8] = 'L'; lc_pkg_header[9] = 'C'; // LC
+	g_internal_peer_ctx->pushWbuf(lc_pkg_header, PKG_HEADER_SIZE);
       }
-      lc_pkg_header[8] = 'L'; lc_pkg_header[9] = 'C'; // LC
-      g_internal_peer_ctx->pushWbuf(lc_pkg_header, PKG_HEADER_SIZE);
 	    
       g_external_peer_ctxes.erase(external_peer_ctx->id());
     } else {
@@ -219,10 +221,6 @@ static void external_peer_cb(struct ev_loop* event_loop, ev_io* io, int events) 
   } // events & EV_READ
 }
 static void external_sock_cb(struct ev_loop* event_loop, ev_io* io, int events) {
-    if(!g_internal_peer_ctx) {
-        printf("internal peer is absent, please wait...\r\n");
-        return ;
-    }
     // peer come
     struct sockaddr_in new_external_peer_addr_in = {0};
     socklen_t peer_addr_in_len = 0;
@@ -250,6 +248,13 @@ static void external_sock_cb(struct ev_loop* event_loop, ev_io* io, int events) 
         printf("fcntl new_external_peer_fd F_SETFL failed, errno: %d\r\n", errno);
 	return ;
     }
+
+    if(!g_internal_peer_ctx) {
+      printf("internal peer is absent, please wait...\r\n");
+      close(new_external_peer_fd);
+      return ;
+    }
+
     
     shared_ptr<CPeerCtx> new_external_peer_ctx = shared_ptr<CPeerCtx>(new CPeerCtx(new_external_peer_fd, new_external_peer_fd, (struct sockaddr*)&new_external_peer_addr_in));
     g_external_peer_ctxes[new_external_peer_ctx->id()] = new_external_peer_ctx;
