@@ -195,28 +195,32 @@ static void external_peer_cb(struct ev_loop* event_loop, ev_io* io, int events) 
 	    
       g_external_peer_ctxes.erase(external_peer_ctx->id());
     } else {
-      // 将external peer的读入缓冲区写入到internal peer的写出缓冲区
-      int dp_pkg_payload_len = external_peer_ctx->rbufLen();
-      char dp_external_peer_pkg_header[PKG_HEADER_SIZE] = {0}; // big-endian
-      {
-	int8_t *pkg_payload_len_bytes = (int8_t *) &dp_pkg_payload_len; // assumed little-endian now
-	int32_t peer_id = external_peer_ctx->id();
-	dp_external_peer_pkg_header[0] = pkg_payload_len_bytes[3];
-	dp_external_peer_pkg_header[1] = pkg_payload_len_bytes[2];
-	dp_external_peer_pkg_header[2] = pkg_payload_len_bytes[1];
-	dp_external_peer_pkg_header[3] = pkg_payload_len_bytes[0];
-	int8_t *peer_id_bytes = (int8_t *) &peer_id; // assumed little-endian
-	dp_external_peer_pkg_header[4] = peer_id_bytes[3];
-	dp_external_peer_pkg_header[5] = peer_id_bytes[2];
-	dp_external_peer_pkg_header[6] = peer_id_bytes[1];
-	dp_external_peer_pkg_header[7] = peer_id_bytes[0];
-      }
-      dp_external_peer_pkg_header[8] = 'D'; dp_external_peer_pkg_header[9] = 'P'; // Data Payload
-      g_internal_peer_ctx->pushWbuf(dp_external_peer_pkg_header, PKG_HEADER_SIZE);
-      const char* external_peer_rbuf = external_peer_ctx->rbuf();
-      g_internal_peer_ctx->pushWbuf(external_peer_rbuf, dp_pkg_payload_len);
+      if (!g_internal_peer_ctx) { // internal peer has gone
+	close(external_peer_ctx->fd());
+      } else {
+	// 将external peer的读入缓冲区写入到internal peer的写出缓冲区
+	int dp_pkg_payload_len = external_peer_ctx->rbufLen();
+	char dp_external_peer_pkg_header[PKG_HEADER_SIZE] = {0}; // big-endian
+	{
+	  int8_t *pkg_payload_len_bytes = (int8_t *) &dp_pkg_payload_len; // assumed little-endian now
+	  int32_t peer_id = external_peer_ctx->id();
+	  dp_external_peer_pkg_header[0] = pkg_payload_len_bytes[3];
+	  dp_external_peer_pkg_header[1] = pkg_payload_len_bytes[2];
+	  dp_external_peer_pkg_header[2] = pkg_payload_len_bytes[1];
+	  dp_external_peer_pkg_header[3] = pkg_payload_len_bytes[0];
+	  int8_t *peer_id_bytes = (int8_t *) &peer_id; // assumed little-endian
+	  dp_external_peer_pkg_header[4] = peer_id_bytes[3];
+	  dp_external_peer_pkg_header[5] = peer_id_bytes[2];
+	  dp_external_peer_pkg_header[6] = peer_id_bytes[1];
+	  dp_external_peer_pkg_header[7] = peer_id_bytes[0];
+	}
+	dp_external_peer_pkg_header[8] = 'D'; dp_external_peer_pkg_header[9] = 'P'; // Data Payload
+	g_internal_peer_ctx->pushWbuf(dp_external_peer_pkg_header, PKG_HEADER_SIZE);
+	const char* external_peer_rbuf = external_peer_ctx->rbuf();
+	g_internal_peer_ctx->pushWbuf(external_peer_rbuf, dp_pkg_payload_len);
 
-      external_peer_ctx->purgeRbuf();
+	external_peer_ctx->purgeRbuf();
+      }
     } // draw returns
   } // events & EV_READ
 }
@@ -286,7 +290,7 @@ static void keep_live_cb(struct ev_loop* event_loop, ev_timer* timer, int events
   ev_tstamp after = (g_last_activity-ev_now(event_loop)) + g_kp_timeout;
   if (after < 0) { // died
     printf("\r\ninternal peer has died\r\n");
-    g_internal_peer_ctx.reset();
+    close(g_internal_peer_ctx->fd());
   } else {
     ev_timer_set(timer, g_kp_timeout, 0);
     ev_timer_start(event_loop, timer);
@@ -354,8 +358,17 @@ static void internal_peer_cb(struct ev_loop* event_loop, ev_io* io, int events) 
       inet_ntop(AF_INET, &((const struct sockaddr_in*)g_internal_peer_ctx->addr())->sin_addr, peer_cidr, sizeof(peer_cidr));
       printf("internal peer(fd: %d, addr(%s:%d)) is eof?!!!\r\n",
 	     io->fd, peer_cidr, ((const struct sockaddr_in*)g_internal_peer_ctx->addr())->sin_port);
+      // stop keep-live
+      ev_timer_stop(event_loop, &g_kp_timer);
       g_internal_peer_ctx.reset();
       // TODO: clear current external peers
+      for (auto external_peer_ctx_ite = g_external_peer_ctxes.begin();
+	   external_peer_ctx_ite != g_external_peer_ctxes.end();
+	   ++ external_peer_ctx_ite) {
+	shared_ptr<CPeerCtx> peer_ctx = external_peer_ctx_ite->second;
+	int peer_fd = peer_ctx->fd();
+	close(peer_fd);
+      }
     } else {
       g_last_activity = ev_now(event_loop);
       consume_internal_peer_pkg(event_loop);
